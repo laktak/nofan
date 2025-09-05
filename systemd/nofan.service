@@ -1,0 +1,14 @@
+[Unit]
+Description=Framwork No Fan
+
+[Service]
+Type=simple
+Restart=always
+RuntimeDirectory=nofan
+RuntimeDirectoryMode=0755
+Group=wheel
+ExecStart=/usr/bin/nofan run
+# ExecStopPost=/bin/sh -c "ectool autofanctrl"
+
+[Install]
+WantedBy=multi-user.target
