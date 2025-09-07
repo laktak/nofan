@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+	// "os/signal"
+	// "syscall"
 )
 
-const socketDir = "/run/nofan"
-
-var socketPath = filepath.Join(socketDir, "nofan.sock")
+var (
+	socketDir  string
+	socketPath string
+)
 
 type Request struct {
 	Cmd string `json:"cmd"`
@@ -27,13 +28,20 @@ type Response struct {
 	Error   string `json:"error,omitempty"`
 }
 
-var (
+type Server struct {
 	counter int64
 	paused  bool
 	mu      sync.RWMutex
-)
+}
 
-func runServer() {
+func NewServer() *Server {
+	return &Server{
+		counter: 0,
+		paused:  false,
+	}
+}
+
+func (s *Server) run() {
 	os.Remove(socketPath)
 
 	listener, err := net.Listen("unix", socketPath)
@@ -44,50 +52,37 @@ func runServer() {
 	defer listener.Close()
 	defer os.Remove(socketPath)
 
-  if err := os.Chmod(socketPath, 0660); err != nil {
-    fmt.Fprintf(os.Stderr, "Failed to set socket permissions: %v\n", err)
-  }
+	if err := os.Chmod(socketPath, 0660); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set socket permissions: %v\n", err)
+	}
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	go func() {
-		for range ticker.C {
-			mu.RLock()
-			p := paused
-			mu.RUnlock()
-
-			if !p {
-				mu.Lock()
-				counter++
-				mu.Unlock()
-			}
-		}
-	}()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				select {
-				case <-sigChan:
-					return
-				default:
-					fmt.Fprintf(os.Stderr, "Accept error: %v\n", err)
-				}
-				return
+				continue
 			}
-			go handleConnection(conn)
+			go s.handleConnection(conn)
 		}
 	}()
 
-	<-sigChan
-	fmt.Println("Shutting down...")
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.RLock()
+			if !s.paused {
+				s.counter++
+				fmt.Printf("Counter: %d\n", s.counter)
+			}
+			s.mu.RUnlock()
+		}
+	}
 }
 
-func handleConnection(conn net.Conn) {
+func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
@@ -104,24 +99,24 @@ func handleConnection(conn net.Conn) {
 
 	switch req.Cmd {
 	case "status":
-		mu.RLock()
-		c := counter
-		p := paused
-		mu.RUnlock()
+		s.mu.RLock()
+		c := s.counter
+		p := s.paused
+		s.mu.RUnlock()
 		sendResponse(conn, Response{
 			Status:  "ok",
 			Counter: c,
 			Error:   fmt.Sprintf("paused:%t", p),
 		})
 	case "pause":
-		mu.Lock()
-		paused = true
-		mu.Unlock()
+		s.mu.Lock()
+		s.paused = true
+		s.mu.Unlock()
 		sendResponse(conn, Response{Status: "ok"})
 	case "resume":
-		mu.Lock()
-		paused = false
-		mu.Unlock()
+		s.mu.Lock()
+		s.paused = false
+		s.mu.Unlock()
 		sendResponse(conn, Response{Status: "ok"})
 	default:
 		sendResponse(conn, Response{Status: "error", Error: "Unknown command"})
@@ -161,8 +156,15 @@ func runClient() {
 }
 
 func main() {
+	socketDir = os.Getenv("NOFAN_SOCKET_DIR")
+	if socketDir == "" {
+		socketDir = "/run/nofan"
+	}
+
+	socketPath = filepath.Join(socketDir, "nofan.sock")
+
 	if len(os.Args) > 1 && os.Args[1] == "run" {
-		runServer()
+		NewServer().run()
 	} else {
 		runClient()
 	}
