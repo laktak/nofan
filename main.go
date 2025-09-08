@@ -11,10 +11,29 @@ import (
 	"time"
 )
 
+const (
+	cpuMaxHist      = 20
+	cpuHistPrio     = 5
+	switchThreshold = 2
+)
+
 var (
 	socketDir  string
 	socketPath string
 )
+
+type CurveEntry struct {
+	temp  float64
+	speed int
+}
+
+var curve = []CurveEntry{
+	CurveEntry{51, 15},
+	CurveEntry{55, 20},
+	CurveEntry{60, 30},
+	CurveEntry{80, 90},
+	CurveEntry{90, 100},
+}
 
 type Request struct {
 	Cmd string `json:"cmd"`
@@ -28,16 +47,16 @@ type Response struct {
 }
 
 type Server struct {
-	counter int64
-	cpuTemp float64
-	paused  bool
-	mu      sync.RWMutex
+	cpuTemp     float64
+	cpuTempHist []float64
+	paused      bool
+	mu          sync.RWMutex
 }
 
 func NewServer() *Server {
 	return &Server{
-		counter: 0,
-		paused:  false,
+		paused:      false,
+		cpuTempHist: make([]float64, 0),
 	}
 }
 
@@ -72,13 +91,47 @@ func (s *Server) run() {
 	for {
 		select {
 		case <-ticker.C:
-			t := getCpuTemp()
+			cpuTemp := getCpuTemp()
 			usage := getCpuUsage()
 			s.mu.Lock()
-			s.cpuTemp = t
+			s.cpuTemp = cpuTemp
+			for len(s.cpuTempHist) < cpuMaxHist+1 {
+				s.cpuTempHist = append(s.cpuTempHist, cpuTemp)
+			}
+			s.cpuTempHist = s.cpuTempHist[1 : cpuMaxHist+1]
+			var t1, t2 float64 = 0.0, 0.0
+			for i := 0; i < cpuMaxHist-cpuHistPrio; i++ {
+				t1 += s.cpuTempHist[i]
+			}
+			for i := cpuMaxHist - cpuHistPrio; i < cpuMaxHist; i++ {
+				t2 += s.cpuTempHist[i]
+			}
+			avg1 := t1 / (cpuMaxHist - cpuHistPrio)
+			avg2 := t2 / (cpuHistPrio)
+			waTemp := max(avg1, avg2)
+
+			fan := 0
+			// next := 100
+			fTemp := 0.0
+			for _, e := range curve {
+				if waTemp > e.temp {
+					fTemp = e.temp
+					fan = e.speed
+				} else {
+					// adjust speed if necessary
+					if fan > 0 {
+						adjust := (waTemp - fTemp) / (e.temp - fTemp)
+						next := float64(e.speed-fan) * adjust
+						fmt.Printf("- %.2f of %d: %.1f\n", adjust, e.speed-fan, next)
+						fan += int(next)
+					}
+					break
+				}
+			}
+
 			if !s.paused {
-				s.counter++
-				fmt.Printf("CPU Temperature: %.2f°C; %.4f\n", t, usage*100.0)
+				fmt.Printf("Temp: %.2f°C (%.2f%%) - fan %d\n", waTemp, usage*100.0, fan)
+				// fmt.Printf("%v\n", s.cpuTempHist)
 			}
 			s.mu.Unlock()
 		}
