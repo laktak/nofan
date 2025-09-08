@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -14,10 +16,11 @@ import (
 const (
 	cpuMaxHist      = 20
 	cpuHistPrio     = 5
-	switchThreshold = 2
+	switchThreshold = 4
 )
 
 var (
+	dryRun     = false
 	socketDir  string
 	socketPath string
 )
@@ -29,8 +32,8 @@ type CurveEntry struct {
 
 var curve = []CurveEntry{
 	CurveEntry{51, 15},
-	CurveEntry{55, 20},
-	CurveEntry{60, 30},
+	CurveEntry{56, 20},
+	CurveEntry{65, 30},
 	CurveEntry{80, 90},
 	CurveEntry{90, 100},
 }
@@ -41,14 +44,16 @@ type Request struct {
 
 type Response struct {
 	Status   string  `json:"status"`
-	FanSpeed int64   `json:"fanSpeed,omitempty"`
+	FanSpeed int     `json:"fanSpeed,omitempty"`
 	CpuTemp  float64 `json:"cpuTemp,omitempty"`
 	Error    string  `json:"error,omitempty"`
 }
 
 type Server struct {
+	count       int64
 	cpuTemp     float64
 	cpuTempHist []float64
+	fanSpeed    int
 	paused      bool
 	mu          sync.RWMutex
 }
@@ -57,6 +62,7 @@ func NewServer() *Server {
 	return &Server{
 		paused:      false,
 		cpuTempHist: make([]float64, 0),
+		fanSpeed:    -switchThreshold - 1,
 	}
 }
 
@@ -92,7 +98,7 @@ func (s *Server) run() {
 		select {
 		case <-ticker.C:
 			cpuTemp := getCpuTemp()
-			usage := getCpuUsage()
+			cpuUsage := getCpuUsage()
 			s.mu.Lock()
 			s.cpuTemp = cpuTemp
 			for len(s.cpuTempHist) < cpuMaxHist+1 {
@@ -111,7 +117,6 @@ func (s *Server) run() {
 			waTemp := max(avg1, avg2)
 
 			fan := 0
-			// next := 100
 			fTemp := 0.0
 			for _, e := range curve {
 				if waTemp > e.temp {
@@ -122,17 +127,30 @@ func (s *Server) run() {
 					if fan > 0 {
 						adjust := (waTemp - fTemp) / (e.temp - fTemp)
 						next := float64(e.speed-fan) * adjust
-						fmt.Printf("- %.2f of %d: %.1f\n", adjust, e.speed-fan, next)
 						fan += int(next)
 					}
 					break
 				}
 			}
 
-			if !s.paused {
-				fmt.Printf("Temp: %.2f°C (%.2f%%) - fan %d\n", waTemp, usage*100.0, fan)
-				// fmt.Printf("%v\n", s.cpuTempHist)
+			if s.count%3 == 0 {
+				if abs(s.fanSpeed-fan) > switchThreshold {
+					s.fanSpeed = fan
+					if !dryRun {
+						fmt.Println("exec", strconv.Itoa(fan))
+						if _, err := exec.Command("ectool", "fanduty", strconv.Itoa(fan)).Output(); err != nil {
+							fmt.Fprintf(os.Stderr, "Failed to set fan speed: %v\n", err)
+						}
+					}
+				}
+
+				fmt.Printf("[%.2f%%] %.2f°C  - fan %d (%d)\n", cpuUsage*100.0, waTemp, s.fanSpeed, fan)
+
+			} else {
+				fmt.Printf("  %.2f°C - fan %d\n", waTemp, fan)
 			}
+
+			s.count++
 			s.mu.Unlock()
 		}
 	}
@@ -179,6 +197,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 }
 
+func abs(n int) int { return max(n, -n) }
+
 func sendResponse(conn net.Conn, resp Response) {
 	data, _ := json.Marshal(resp)
 	conn.Write(append(data, '\n'))
@@ -212,6 +232,10 @@ func runClient() {
 }
 
 func main() {
+	dryRun = os.Getenv("NOFAN_DRYRUN") != ""
+	if dryRun {
+		fmt.Fprintf(os.Stderr, "dry-run!\n")
+	}
 	socketDir = os.Getenv("NOFAN_SOCKET_DIR")
 	if socketDir == "" {
 		socketDir = "/run/nofan"
