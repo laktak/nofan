@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 	// "os/signal"
@@ -23,13 +26,15 @@ type Request struct {
 }
 
 type Response struct {
-	Status  string `json:"status"`
-	Counter int64  `json:"counter,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Status   string  `json:"status"`
+	FanSpeed int64   `json:"fanSpeed,omitempty"`
+	CpuTemp  float64 `json:"cpuTemp,omitempty"`
+	Error    string  `json:"error,omitempty"`
 }
 
 type Server struct {
 	counter int64
+	cpuTemp float64
 	paused  bool
 	mu      sync.RWMutex
 }
@@ -72,9 +77,12 @@ func (s *Server) run() {
 	for {
 		select {
 		case <-ticker.C:
+			t := getCpuTemp()
 			s.mu.RLock()
+			s.cpuTemp = t
 			if !s.paused {
 				s.counter++
+				fmt.Printf("CPU Temperature: %.2f°C\n", t)
 				fmt.Printf("Counter: %d\n", s.counter)
 			}
 			s.mu.RUnlock()
@@ -100,12 +108,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 	switch req.Cmd {
 	case "status":
 		s.mu.RLock()
-		c := s.counter
+		t := s.cpuTemp
 		p := s.paused
 		s.mu.RUnlock()
 		sendResponse(conn, Response{
 			Status:  "ok",
-			Counter: c,
+			CpuTemp: t,
 			Error:   fmt.Sprintf("paused:%t", p),
 		})
 	case "pause":
@@ -126,6 +134,22 @@ func (s *Server) handleConnection(conn net.Conn) {
 func sendResponse(conn net.Conn, resp Response) {
 	data, _ := json.Marshal(resp)
 	conn.Write(append(data, '\n'))
+}
+
+func getCpuTemp() float64 {
+	data, err := ioutil.ReadFile("/sys/class/thermal/thermal_zone0/temp")
+	if err != nil {
+		fmt.Printf("Error reading temperature: %v\n", err)
+		return 0
+	}
+
+	tempStr := strings.TrimSpace(string(data))
+	temp, err := strconv.Atoi(tempStr)
+	if err != nil {
+		fmt.Printf("Error converting temperature: %v\n", err)
+		return 0
+	}
+	return float64(temp) / 1000.0
 }
 
 func runClient() {
