@@ -4,16 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-	// "os/signal"
-	// "syscall"
 )
 
 var (
@@ -78,14 +73,14 @@ func (s *Server) run() {
 		select {
 		case <-ticker.C:
 			t := getCpuTemp()
-			s.mu.RLock()
+			usage := getCpuUsage()
+			s.mu.Lock()
 			s.cpuTemp = t
 			if !s.paused {
 				s.counter++
-				fmt.Printf("CPU Temperature: %.2f°C\n", t)
-				fmt.Printf("Counter: %d\n", s.counter)
+				fmt.Printf("CPU Temperature: %.2f°C; %.4f\n", t, usage*100.0)
 			}
-			s.mu.RUnlock()
+			s.mu.Unlock()
 		}
 	}
 }
@@ -134,22 +129,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 func sendResponse(conn net.Conn, resp Response) {
 	data, _ := json.Marshal(resp)
 	conn.Write(append(data, '\n'))
-}
-
-func getCpuTemp() float64 {
-	data, err := ioutil.ReadFile("/sys/class/thermal/thermal_zone0/temp")
-	if err != nil {
-		fmt.Printf("Error reading temperature: %v\n", err)
-		return 0
-	}
-
-	tempStr := strings.TrimSpace(string(data))
-	temp, err := strconv.Atoi(tempStr)
-	if err != nil {
-		fmt.Printf("Error converting temperature: %v\n", err)
-		return 0
-	}
-	return float64(temp) / 1000.0
 }
 
 func runClient() {
