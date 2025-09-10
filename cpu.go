@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io/ioutil"
 	"os"
 	"strconv"
@@ -14,23 +13,11 @@ var (
 )
 
 func getCpuTemp() float64 {
-	// data, err := ioutil.ReadFile("/sys/class/thermal/thermal_zone0/temp")
-	// if err != nil {
-	// 	fmt.Printf("Error reading temperature: %v\n", err)
-	// 	return 0
-	// }
-	//
-	// tempStr := strings.TrimSpace(string(data))
-	// temp, err := strconv.Atoi(tempStr)
-	// if err != nil {
-	// 	fmt.Printf("Error converting temperature: %v\n", err)
-	// 	return 0
-	// }
 
 	thermalDir := "/sys/class/thermal"
 	entries, err := ioutil.ReadDir(thermalDir)
 	if err != nil {
-		fmt.Printf("Error reading thermal directory: %v\n", err)
+		log.Error("Error reading thermal directory: %v", err)
 		return 0
 	}
 
@@ -74,7 +61,7 @@ func getCpuUsage() float64 {
 			for i := 1; i < n; i++ {
 				v, err := strconv.ParseUint(fields[i], 10, 64)
 				if err != nil {
-					// fmt.Println("Error: ", i, fields[i], err)
+					log.Error("error parsing temp %d %s %v", i, fields[i], err)
 					return -1
 				}
 				if i == 4 || i == 5 {

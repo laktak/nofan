@@ -1,7 +1,5 @@
 package main
 
-const tempThreshold = 4
-
 type SlotConfig struct {
 	temp    float64
 	speed   int
@@ -13,8 +11,12 @@ var config = []SlotConfig{
 	SlotConfig{51, 15, false},
 	SlotConfig{56, 20, false},
 	SlotConfig{65, 25, false},
-	SlotConfig{75, 35, true},
-	SlotConfig{90, 100, false},
+	SlotConfig{70, 35, true},
+	SlotConfig{75, 40, true},
+	SlotConfig{80, 50, true},
+	SlotConfig{85, 70, true},
+	SlotConfig{90, 90, true},
+	SlotConfig{95, 100, true},
 }
 
 type SlotEntry struct {
@@ -65,15 +67,16 @@ func (s *Spec) find(temp float64) *SlotEntry {
 	return entry
 }
 
-func (e *SlotEntry) stayInSlot(temp float64) bool {
-	return temp > e.from-tempThreshold && temp < e.to+tempThreshold
+func (e *SlotEntry) isInSlot(temp, threshold float64) bool {
+	return temp > e.from-threshold && temp < e.to+threshold
 }
 
-func (e *SlotEntry) getSpeed(temp float64) int {
+func (e *SlotEntry) getAdjustedSpeed(temp float64) int {
 	fan := e.speed
 	if e.speed2 > fan {
 		// adjust speed if dynamic
 		adjust := (temp - e.from) / (e.to - e.from)
+		// fmt.Fprintf(os.Stderr, "  adjust: %d + %d * %.2f\n", e.speed, e.speed2-e.speed, adjust)
 		fan += int(float64(e.speed2-fan) * adjust)
 	}
 	return fan

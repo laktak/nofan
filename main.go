@@ -17,7 +17,9 @@ const (
 	cpuMaxHist     = 20
 	cpuHistPrio    = 5
 	updateInterval = 4
+	tempThreshold  = 2.5
 	speedThreshold = 4
+	minDownTick    = updateInterval * 4
 )
 
 var (
@@ -26,12 +28,13 @@ var (
 	socketPath string
 )
 
+var log *Logger
+
 type Request struct {
 	Cmd string `json:"cmd"`
 }
 
 type Response struct {
-	Status   string  `json:"status"`
 	FanSpeed int     `json:"fanSpeed,omitempty"`
 	CpuTemp  float64 `json:"cpuTemp,omitempty"`
 	Error    string  `json:"error,omitempty"`
@@ -41,9 +44,10 @@ type Server struct {
 	spec        Spec
 	cpuTemp     float64
 	cpuTempHist []float64
-	slot        *SlotEntry
 	fanSpeed    int
-	count       int64
+	slot        *SlotEntry
+	slotTick    int64
+	ticks       int64
 	mu          sync.RWMutex
 	paused      bool
 }
@@ -83,14 +87,14 @@ func (s *Server) run() {
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create socket: %v\n", err)
+		log.Error("failed to create socket: %v", err)
 		os.Exit(1)
 	}
 	defer listener.Close()
 	defer os.Remove(socketPath)
 
 	if err := os.Chmod(socketPath, 0660); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to set socket permissions: %v\n", err)
+		log.Error("failed to set socket permissions: %v", err)
 	}
 
 	ticker := time.NewTicker(1 * time.Second)
@@ -110,35 +114,40 @@ func (s *Server) run() {
 		select {
 		case <-ticker.C:
 			cpuTemp := getCpuTemp()
-			cpuUsage := getCpuUsage()
+			// cpuUsage := getCpuUsage()
 			s.mu.Lock()
 			s.pushCpuTemp(cpuTemp)
 
-			if s.count%updateInterval == 0 {
+			if s.ticks%updateInterval == 0 {
 
 				wtemp := s.getWeightedCpuTemp()
-				if s.slot == nil || !s.slot.stayInSlot(wtemp) {
-					s.slot = s.spec.find(wtemp)
-					fmt.Fprintf(os.Stderr, "- set slot: %.0f\n", s.slot.from)
+				if s.slot == nil || !s.slot.isInSlot(wtemp, tempThreshold) {
+					ns := s.spec.find(wtemp)
+					if s.slot == nil || ns.from > s.slot.from || s.ticks-s.slotTick >= minDownTick {
+						s.slot = s.spec.find(wtemp)
+						s.slotTick = s.ticks
+						log.Info("- set slot: %.0f", s.slot.from)
+					}
+				} else if s.slot.isInSlot(wtemp, 0) {
+					s.slotTick = s.ticks
 				}
 
-				fan := s.slot.getSpeed(wtemp)
-				if abs(s.fanSpeed-fan) > speedThreshold {
+				fan := s.slot.speed
+				if abs(s.fanSpeed-fan) > speedThreshold || fan == 100 && s.fanSpeed < 100 {
 					s.fanSpeed = fan
-					fmt.Fprintf(os.Stderr, "- set speed: %d\n", fan)
+					log.Info("- set speed: %d", fan)
 					if !dryRun {
 						if _, err := exec.Command("ectool", "fanduty", strconv.Itoa(fan)).Output(); err != nil {
-							fmt.Fprintf(os.Stderr, "Failed to set fan speed: %v\n", err)
+							log.Error("failed to set fan speed: %v", err)
 						}
 					}
 				}
 
-				fmt.Printf("[%.0f:%d] %.2f°C - fan %d \n", s.slot.from, s.fanSpeed, wtemp, fan)
-			} else {
-				fmt.Printf("  [%.2f%%] %.2f°C\n", cpuUsage*100.0, cpuTemp)
+				log.Info("[%.0f-%.0f:%d] %.2f°C - fan %d (%d)", s.slot.from, s.slot.to, s.slot.speed, wtemp, s.fanSpeed, fan)
+				log.Debug("%v", s.cpuTempHist)
 			}
 
-			s.count++
+			s.ticks++
 			s.mu.Unlock()
 		}
 	}
@@ -155,7 +164,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	var req Request
 	if err := json.Unmarshal(data, &req); err != nil {
-		sendResponse(conn, Response{Status: "error", Error: "Invalid JSON"})
+		sendResponse(conn, Response{Error: "Invalid JSON"})
 		return
 	}
 
@@ -163,25 +172,22 @@ func (s *Server) handleConnection(conn net.Conn) {
 	case "status":
 		s.mu.RLock()
 		t := s.cpuTemp
-		p := s.paused
 		s.mu.RUnlock()
 		sendResponse(conn, Response{
-			Status:  "ok",
 			CpuTemp: t,
-			Error:   fmt.Sprintf("paused:%t", p),
 		})
 	case "pause":
 		s.mu.Lock()
 		s.paused = true
 		s.mu.Unlock()
-		sendResponse(conn, Response{Status: "ok"})
+		sendResponse(conn, Response{})
 	case "resume":
 		s.mu.Lock()
 		s.paused = false
 		s.mu.Unlock()
-		sendResponse(conn, Response{Status: "ok"})
+		sendResponse(conn, Response{})
 	default:
-		sendResponse(conn, Response{Status: "error", Error: "Unknown command"})
+		sendResponse(conn, Response{Error: "Unknown command"})
 	}
 }
 
@@ -220,6 +226,7 @@ func runClient() {
 }
 
 func main() {
+
 	dryRun = os.Getenv("NOFAN_DRYRUN") != ""
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "dry-run!\n")
@@ -232,6 +239,15 @@ func main() {
 	socketPath = filepath.Join(socketDir, "nofan.sock")
 
 	if len(os.Args) > 1 && os.Args[1] == "run" {
+
+		var err error
+		log, err = NewLogger("/tmp/nofan.log")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open log: %v\n", err)
+			os.Exit(1)
+		}
+		defer log.Close()
+
 		NewServer(NewSpec(config)).run()
 	} else {
 		runClient()
