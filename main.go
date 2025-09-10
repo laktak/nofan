@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	cpuMaxHist      = 20
-	cpuHistPrio     = 5
-	switchThreshold = 4
+	cpuMaxHist     = 20
+	cpuHistPrio    = 5
+	updateInterval = 4
+	speedThreshold = 4
 )
 
 var (
@@ -24,19 +25,6 @@ var (
 	socketDir  string
 	socketPath string
 )
-
-type CurveEntry struct {
-	temp  float64
-	speed int
-}
-
-var curve = []CurveEntry{
-	CurveEntry{51, 15},
-	CurveEntry{56, 20},
-	CurveEntry{65, 30},
-	CurveEntry{80, 90},
-	CurveEntry{90, 100},
-}
 
 type Request struct {
 	Cmd string `json:"cmd"`
@@ -50,20 +38,44 @@ type Response struct {
 }
 
 type Server struct {
-	count       int64
+	spec        Spec
 	cpuTemp     float64
 	cpuTempHist []float64
+	slot        *SlotEntry
 	fanSpeed    int
-	paused      bool
+	count       int64
 	mu          sync.RWMutex
+	paused      bool
 }
 
-func NewServer() *Server {
+func NewServer(spec Spec) *Server {
 	return &Server{
+		spec:        spec,
 		paused:      false,
 		cpuTempHist: make([]float64, 0),
-		fanSpeed:    -switchThreshold - 1,
+		fanSpeed:    -speedThreshold - 1,
 	}
+}
+
+func (s *Server) pushCpuTemp(temp float64) {
+	s.cpuTemp = temp
+	for len(s.cpuTempHist) < cpuMaxHist+1 {
+		s.cpuTempHist = append(s.cpuTempHist, temp)
+	}
+	s.cpuTempHist = s.cpuTempHist[1 : cpuMaxHist+1]
+}
+
+func (s *Server) getWeightedCpuTemp() float64 {
+	var t1, t2 float64 = 0.0, 0.0
+	for i := 0; i < cpuMaxHist-cpuHistPrio; i++ {
+		t1 += s.cpuTempHist[i]
+	}
+	for i := cpuMaxHist - cpuHistPrio; i < cpuMaxHist; i++ {
+		t2 += s.cpuTempHist[i]
+	}
+	avg1 := t1 / (cpuMaxHist - cpuHistPrio)
+	avg2 := t2 / (cpuHistPrio)
+	return max(avg1, avg2)
 }
 
 func (s *Server) run() {
@@ -100,54 +112,30 @@ func (s *Server) run() {
 			cpuTemp := getCpuTemp()
 			cpuUsage := getCpuUsage()
 			s.mu.Lock()
-			s.cpuTemp = cpuTemp
-			for len(s.cpuTempHist) < cpuMaxHist+1 {
-				s.cpuTempHist = append(s.cpuTempHist, cpuTemp)
-			}
-			s.cpuTempHist = s.cpuTempHist[1 : cpuMaxHist+1]
-			var t1, t2 float64 = 0.0, 0.0
-			for i := 0; i < cpuMaxHist-cpuHistPrio; i++ {
-				t1 += s.cpuTempHist[i]
-			}
-			for i := cpuMaxHist - cpuHistPrio; i < cpuMaxHist; i++ {
-				t2 += s.cpuTempHist[i]
-			}
-			avg1 := t1 / (cpuMaxHist - cpuHistPrio)
-			avg2 := t2 / (cpuHistPrio)
-			waTemp := max(avg1, avg2)
+			s.pushCpuTemp(cpuTemp)
 
-			fan := 0
-			fTemp := 0.0
-			for _, e := range curve {
-				if waTemp > e.temp {
-					fTemp = e.temp
-					fan = e.speed
-				} else {
-					// adjust speed if necessary
-					if fan > 0 {
-						adjust := (waTemp - fTemp) / (e.temp - fTemp)
-						next := float64(e.speed-fan) * adjust
-						fan += int(next)
-					}
-					break
+			if s.count%updateInterval == 0 {
+
+				wtemp := s.getWeightedCpuTemp()
+				if s.slot == nil || !s.slot.stayInSlot(wtemp) {
+					s.slot = s.spec.find(wtemp)
+					fmt.Fprintf(os.Stderr, "- set slot: %.0f\n", s.slot.from)
 				}
-			}
 
-			if s.count%3 == 0 {
-				if abs(s.fanSpeed-fan) > switchThreshold {
+				fan := s.slot.getSpeed(wtemp)
+				if abs(s.fanSpeed-fan) > speedThreshold {
 					s.fanSpeed = fan
+					fmt.Fprintf(os.Stderr, "- set speed: %d\n", fan)
 					if !dryRun {
-						fmt.Println("exec", strconv.Itoa(fan))
 						if _, err := exec.Command("ectool", "fanduty", strconv.Itoa(fan)).Output(); err != nil {
 							fmt.Fprintf(os.Stderr, "Failed to set fan speed: %v\n", err)
 						}
 					}
 				}
 
-				fmt.Printf("[%.2f%%] %.2f°C  - fan %d (%d)\n", cpuUsage*100.0, waTemp, s.fanSpeed, fan)
-
+				fmt.Printf("[%.0f:%d] %.2f°C - fan %d \n", s.slot.from, s.fanSpeed, wtemp, fan)
 			} else {
-				fmt.Printf("  %.2f°C - fan %d\n", waTemp, fan)
+				fmt.Printf("  [%.2f%%] %.2f°C\n", cpuUsage*100.0, cpuTemp)
 			}
 
 			s.count++
@@ -244,7 +232,7 @@ func main() {
 	socketPath = filepath.Join(socketDir, "nofan.sock")
 
 	if len(os.Args) > 1 && os.Args[1] == "run" {
-		NewServer().run()
+		NewServer(NewSpec(config)).run()
 	} else {
 		runClient()
 	}
