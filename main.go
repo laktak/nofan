@@ -82,6 +82,18 @@ func (s *Server) getWeightedCpuTemp() float64 {
 	return max(avg1, avg2)
 }
 
+func (s *Server) setSpeed(fan int) {
+	if _, err := exec.Command("ectool", "fanduty", strconv.Itoa(fan)).Output(); err != nil {
+		log.Error("failed to set fan speed: %v", err)
+	}
+}
+
+func (s *Server) setSpeedAuto() {
+	if _, err := exec.Command("ectool", "autofanctrl").Output(); err != nil {
+		log.Error("failed to set fan to auto: %v", err)
+	}
+}
+
 func (s *Server) run() {
 	os.Remove(socketPath)
 
@@ -118,7 +130,7 @@ func (s *Server) run() {
 			s.mu.Lock()
 			s.pushCpuTemp(cpuTemp)
 
-			if s.ticks%updateInterval == 0 {
+			if s.ticks%updateInterval == 0 && !s.paused {
 
 				wtemp := s.getWeightedCpuTemp()
 				if s.slot == nil || !s.slot.isInSlot(wtemp, tempThreshold) {
@@ -137,9 +149,7 @@ func (s *Server) run() {
 					s.fanSpeed = fan
 					log.Info("- set speed: %d", fan)
 					if !dryRun {
-						if _, err := exec.Command("ectool", "fanduty", strconv.Itoa(fan)).Output(); err != nil {
-							log.Error("failed to set fan speed: %v", err)
-						}
+						s.setSpeed(fan)
 					}
 				}
 
@@ -180,6 +190,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		s.mu.Lock()
 		s.paused = true
 		s.mu.Unlock()
+		s.setSpeedAuto()
 		sendResponse(conn, Response{})
 	case "resume":
 		s.mu.Lock()
@@ -198,27 +209,27 @@ func sendResponse(conn net.Conn, resp Response) {
 	conn.Write(append(data, '\n'))
 }
 
-func runClient() {
-	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: %s client <command>\n", os.Args[0])
+func runClient(args []string) {
+	if len(args) < 2 {
+		fmt.Println("usage: nofan <command>")
 		os.Exit(1)
 	}
 
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to connect to server: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to connect to server: %v\n", err)
 		os.Exit(1)
 	}
 	defer conn.Close()
 
-	req := Request{Cmd: os.Args[2]}
+	req := Request{Cmd: args[1]}
 	data, _ := json.Marshal(req)
 	conn.Write(append(data, '\n'))
 
 	reader := bufio.NewReader(conn)
 	response, err := reader.ReadBytes('\n')
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read response: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to read response: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -250,6 +261,6 @@ func main() {
 
 		NewServer(NewSpec(config)).run()
 	} else {
-		runClient()
+		runClient(os.Args)
 	}
 }
