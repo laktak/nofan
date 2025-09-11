@@ -20,10 +20,16 @@ func NewLogger(logFile string) (*Logger, error) {
 		return nil, err
 	}
 
-	return &Logger{
+	log := &Logger{
 		file:    file,
 		log_con: os.Getenv("LOG_CON") != "",
-	}, nil
+	}
+
+	if err := os.Chmod(logFile, 0660); err != nil {
+		log.Error("failed to set log permissions: %v", err)
+	}
+
+	return log, nil
 }
 
 func (l *Logger) Close() error {
