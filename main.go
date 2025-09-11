@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 )
 
-
 func runClient(args []string) {
 	if len(args) < 2 {
 		fmt.Println("usage: nofan <command>")
@@ -36,8 +35,20 @@ func runClient(args []string) {
 
 	var res Response
 	if err := json.Unmarshal(response, &res); err == nil {
-		pretty, _ := json.MarshalIndent(res, "", "  ")
-		fmt.Println(string(pretty))
+		if len(args) == 3 && args[2] == "text" {
+			if res.FanSpeed != nil {
+				fmt.Printf("fan-speed: %d\n", *res.FanSpeed)
+			}
+			if res.CpuTemp != nil {
+				fmt.Printf("cpu-temp: %.1f\n", *res.CpuTemp)
+			}
+			if res.Error != "" {
+				fmt.Printf("error: %s\n", res.Error)
+			}
+		} else {
+			pretty, _ := json.MarshalIndent(res, "", "  ")
+			fmt.Println(string(pretty))
+		}
 	} else {
 		fmt.Print(string(response))
 	}

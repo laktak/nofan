@@ -211,4 +211,3 @@ func sendResponse(conn net.Conn, resp Response) {
 	data, _ := json.Marshal(resp)
 	conn.Write(append(data, '\n'))
 }
-
