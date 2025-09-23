@@ -1,5 +1,5 @@
 [Unit]
-Description=Framwork No Fan
+Description=nofan Framwork 16
 
 [Service]
 Type=simple
