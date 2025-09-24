@@ -18,22 +18,38 @@ If you are looking for an alternative (which I took the ectool idea from), see h
 
 ## Setup
 
-On arch, use PKGBUILD/AUR (todo)
+### Arch Linux
+
+https://aur.archlinux.org/packages/nofan
+
+Install with your aur package manager, e.g.
+
+```
+paru -S nofan
+
+# enable the service
+systemctl enable nofan --now
+```
+
+## Build
 
 On other systems with systemd:
 
 ```
+# build binary
+scripts/build
+
 # install binary
 install -Dm755 nofan "/usr/bin/nofan"
 
-# install systemd service
+# install systemd service and config
 install -Dm644 systemd/nofan.service "/usr/lib/systemd/system/nofan.service"
-
-# install tmpfiles configuration
 install -Dm644 systemd/tmpfiles.conf "/usr/lib/tmpfiles.d/nofan.conf"
-
-# install sleep configuration
 install -Dm644 systemd/on_sleep "/usr/lib/systemd/system-sleep/nofan"
+systemctl daemon-reload
+
+# enable the service
+systemctl enable nofan --now
 ```
 
 Dependencies:
