@@ -1,0 +1,35 @@
+#!/bin/bash
+set -eE -o pipefail
+
+script_dir=$(dirname "$(realpath "$0")")
+cd $script_dir/..
+
+if [ -z "$version" ]; then
+    version=$(git rev-parse HEAD)
+fi
+
+echo "building version $version"
+
+mkdir -p dist
+rm -f dist/*
+
+build() {
+    echo "- $1-$2"
+    rm -f dist/nofan
+    CGO_ENABLED=0 GOOS="$1" GOARCH="$2" go build -o dist -ldflags="-X main.appVersion=$version" .
+
+    pushd dist
+
+    outfile="nofan-$1-$2.tar.gz"
+    tar -czf "$outfile" nofan --remove-files
+
+    popd
+}
+
+if [[ -z $2 ]]; then
+    build linux amd64
+    # build netbsd amd64
+    # build openbsd amd64
+else
+    build $1 $2
+fi
